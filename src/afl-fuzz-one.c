@@ -5,11 +5,11 @@
    Originally written by Michal Zalewski
 
    Now maintained by Marc Heuse <mh@mh-sec.de>,
-                        Heiko Eissfeldt <heiko.eissfeldt@hexco.de> and
+                        Heiko Eißfeldt <heiko.eissfeldt@hexco.de> and
                         Andrea Fioraldi <andreafioraldi@gmail.com>
 
    Copyright 2016, 2017 Google Inc. All rights reserved.
-   Copyright 2019-2024 AFLplusplus Project. All rights reserved.
+   Copyright 2019-2023 AFLplusplus Project. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -28,6 +28,46 @@
 #include <limits.h>
 #include "cmplog.h"
 #include "afl-mutations.h"
+
+
+static const u8 aes_sbox[256] = {
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
+};
+
+u32 feistel(u32 input, uint16_t key) {
+    uint16_t left = input >> 16;
+    uint16_t right = input & 0xFFFF;
+
+    
+
+    // Apply the AES S-box to the lower and upper 8 bits of the right half
+    uint8_t lower_right = right & 0xFF;
+    uint8_t upper_right = (right >> 8) & 0xFF;
+    lower_right = aes_sbox[lower_right];
+    upper_right = aes_sbox[upper_right];
+
+    // Recombine the modified lower and upper halves of the right half
+    right = ((uint16_t)upper_right << 8) | lower_right;
+   // XOR the right half with the key for this round
+    right ^= key;  // Key is now of type uint16_t
+    // Swap left and right halves and recombine
+    return ((u32)right << 16) | left;
+}
 
 /* MOpt */
 
@@ -329,9 +369,9 @@ u8 fuzz_one_original(afl_state_t *afl) {
   u32 len, temp_len;
   u32 j;
   u32 i;
-  u8 *in_buf, *out_buf, *orig_in, *ex_tmp;
+  u8 *in_buf, *out_buf, *orig_in, *ex_tmp, *eff_map = 0;
   u64 havoc_queued = 0, orig_hit_cnt, new_hit_cnt = 0, prev_cksum, _prev_cksum;
-  u32 splice_cycle = 0, perf_score = 100, orig_perf;
+  u32 splice_cycle = 0, perf_score = 100, orig_perf, eff_cnt = 1;
 
   u8 ret_val = 1, doing_det = 0;
 
@@ -545,37 +585,12 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   }
 
-  u64 before_det_time = get_cur_time();
-#ifdef INTROSPECTION
-
-  u64 before_havoc_time;
-  u32 before_det_findings = afl->queued_items,
-      before_det_edges = count_non_255_bytes(afl, afl->virgin_bits),
-      before_havoc_findings, before_havoc_edges;
-  u8 is_logged = 0;
-
-#endif
-  if (!afl->skip_deterministic) {
-
-    if (!skip_deterministic_stage(afl, in_buf, out_buf, len, before_det_time)) {
-
-      goto abandon_entry;
-
-    }
-
-  }
-
-  u8 *skip_eff_map = afl->queue_cur->skipdet_e->skip_eff_map;
-
   /* Skip right away if -d is given, if it has not been chosen sufficiently
      often to warrant the expensive deterministic stage (fuzz_level), or
      if it has gone through deterministic testing in earlier, resumed runs
      (passed_det). */
-  /* if skipdet decide to skip the seed or no interesting bytes found,
-     we skip the whole deterministic stage as well */
 
   if (likely(afl->skip_deterministic) || likely(afl->queue_cur->passed_det) ||
-      likely(!afl->queue_cur->skipdet_e->quick_eff_bytes) ||
       likely(perf_score <
              (afl->queue_cur->depth * 30 <= afl->havoc_max_mult * 100
                   ? afl->queue_cur->depth * 30
@@ -633,10 +648,6 @@ u8 fuzz_one_original(afl_state_t *afl) {
   for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
 
     afl->stage_cur_byte = afl->stage_cur >> 3;
-
-    if (!skip_eff_map[afl->stage_cur_byte]) continue;
-
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
     FLIP_BIT(out_buf, afl->stage_cur);
 
@@ -754,10 +765,6 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     afl->stage_cur_byte = afl->stage_cur >> 3;
 
-    if (!skip_eff_map[afl->stage_cur_byte]) continue;
-
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
-
     FLIP_BIT(out_buf, afl->stage_cur);
     FLIP_BIT(out_buf, afl->stage_cur + 1);
 
@@ -793,10 +800,6 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     afl->stage_cur_byte = afl->stage_cur >> 3;
 
-    if (!skip_eff_map[afl->stage_cur_byte]) continue;
-
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
-
     FLIP_BIT(out_buf, afl->stage_cur);
     FLIP_BIT(out_buf, afl->stage_cur + 1);
     FLIP_BIT(out_buf, afl->stage_cur + 2);
@@ -824,6 +827,34 @@ u8 fuzz_one_original(afl_state_t *afl) {
   afl->queue_cur->stats_mutated += afl->stage_max;
 #endif
 
+  /* Effector map setup. These macros calculate:
+
+     EFF_APOS      - position of a particular file offset in the map.
+     EFF_ALEN      - length of a map with a particular number of bytes.
+     EFF_SPAN_ALEN - map span for a sequence of bytes.
+
+   */
+
+#define EFF_APOS(_p) ((_p) >> EFF_MAP_SCALE2)
+#define EFF_REM(_x) ((_x) & ((1 << EFF_MAP_SCALE2) - 1))
+#define EFF_ALEN(_l) (EFF_APOS(_l) + !!EFF_REM(_l))
+#define EFF_SPAN_ALEN(_p, _l) (EFF_APOS((_p) + (_l)-1) - EFF_APOS(_p) + 1)
+
+  /* Initialize effector map for the next step (see comments below). Always
+     flag first and last byte as doing something. */
+
+  eff_map = afl_realloc(AFL_BUF_PARAM(eff), EFF_ALEN(len));
+  if (unlikely(!eff_map)) { PFATAL("alloc"); }
+  memset(eff_map, 0, EFF_ALEN(len));
+  eff_map[0] = 1;
+
+  if (EFF_APOS(len - 1) != 0) {
+
+    eff_map[EFF_APOS(len - 1)] = 1;
+    ++eff_cnt;
+
+  }
+
   /* Walking byte. */
 
   afl->stage_name = "bitflip 8/8";
@@ -837,10 +868,6 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     afl->stage_cur_byte = afl->stage_cur;
 
-    if (!skip_eff_map[afl->stage_cur_byte]) continue;
-
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
-
     out_buf[afl->stage_cur] ^= 0xFF;
 
 #ifdef INTROSPECTION
@@ -850,19 +877,59 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     if (common_fuzz_stuff(afl, out_buf, len)) { goto abandon_entry; }
 
+    /* We also use this stage to pull off a simple trick: we identify
+       bytes that seem to have no effect on the current execution path
+       even when fully flipped - and we skip them during more expensive
+       deterministic stages, such as arithmetics or known ints. */
+
+    if (!eff_map[EFF_APOS(afl->stage_cur)]) {
+
+      u64 cksum;
+
+      /* If in non-instrumented mode or if the file is very short, just flag
+         everything without wasting time on checksums. */
+
+      if (!afl->non_instrumented_mode && len >= EFF_MIN_LEN) {
+
+        cksum = hash64(afl->fsrv.trace_bits, afl->fsrv.map_size, HASH_CONST);
+
+      } else {
+
+        cksum = ~prev_cksum;
+
+      }
+
+      if (cksum != prev_cksum) {
+
+        eff_map[EFF_APOS(afl->stage_cur)] = 1;
+        ++eff_cnt;
+
+      }
+
+    }
+
     out_buf[afl->stage_cur] ^= 0xFF;
 
   }
 
-  /* New effective bytes calculation. */
+  /* If the effector map is more than EFF_MAX_PERC dense, just flag the
+     whole thing as worth fuzzing, since we wouldn't be saving much time
+     anyway. */
 
-  for (i = 0; i < len; i++) {
+  if (eff_cnt != (u32)EFF_ALEN(len) &&
+      eff_cnt * 100 / EFF_ALEN(len) > EFF_MAX_PERC) {
 
-    if (skip_eff_map[i]) afl->blocks_eff_select += 1;
+    memset(eff_map, 1, EFF_ALEN(len));
+
+    afl->blocks_eff_select += EFF_ALEN(len);
+
+  } else {
+
+    afl->blocks_eff_select += eff_cnt;
 
   }
 
-  afl->blocks_eff_total += len;
+  afl->blocks_eff_total += EFF_ALEN(len);
 
   new_hit_cnt = afl->queued_items + afl->saved_crashes;
 
@@ -887,9 +954,12 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)]) {
 
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
+      --afl->stage_max;
+      continue;
+
+    }
 
     afl->stage_cur_byte = i;
 
@@ -929,10 +999,13 @@ u8 fuzz_one_original(afl_state_t *afl) {
   for (i = 0; i < len - 3; ++i) {
 
     /* Let's consult the effector map... */
+    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)] &&
+        !eff_map[EFF_APOS(i + 2)] && !eff_map[EFF_APOS(i + 3)]) {
 
-    if (!skip_eff_map[i]) continue;
+      --afl->stage_max;
+      continue;
 
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
+    }
 
     afl->stage_cur_byte = i;
 
@@ -983,9 +1056,12 @@ skip_bitflip:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!eff_map[EFF_APOS(i)]) {
 
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
+      afl->stage_max -= 2 * ARITH_MAX;
+      continue;
+
+    }
 
     afl->stage_cur_byte = i;
 
@@ -1067,9 +1143,12 @@ skip_bitflip:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)]) {
 
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
+      afl->stage_max -= 4 * ARITH_MAX;
+      continue;
+
+    }
 
     afl->stage_cur_byte = i;
 
@@ -1197,9 +1276,13 @@ skip_bitflip:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)] &&
+        !eff_map[EFF_APOS(i + 2)] && !eff_map[EFF_APOS(i + 3)]) {
 
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
+      afl->stage_max -= 4 * ARITH_MAX;
+      continue;
+
+    }
 
     afl->stage_cur_byte = i;
 
@@ -1331,9 +1414,12 @@ skip_arith:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!eff_map[EFF_APOS(i)]) {
 
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
+      afl->stage_max -= sizeof(interesting_8);
+      continue;
+
+    }
 
     afl->stage_cur_byte = i;
 
@@ -1391,9 +1477,12 @@ skip_arith:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)]) {
 
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
+      afl->stage_max -= sizeof(interesting_16);
+      continue;
+
+    }
 
     afl->stage_cur_byte = i;
 
@@ -1479,9 +1568,13 @@ skip_arith:
 
     /* Let's consult the effector map... */
 
-    if (!skip_eff_map[i]) continue;
+    if (!eff_map[EFF_APOS(i)] && !eff_map[EFF_APOS(i + 1)] &&
+        !eff_map[EFF_APOS(i + 2)] && !eff_map[EFF_APOS(i + 3)]) {
 
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
+      afl->stage_max -= sizeof(interesting_32) >> 1;
+      continue;
+
+    }
 
     afl->stage_cur_byte = i;
 
@@ -1573,10 +1666,6 @@ skip_interest:
 
     u32 last_len = 0;
 
-    if (!skip_eff_map[i]) continue;
-
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
-
     afl->stage_cur_byte = i;
 
     /* Extras are sorted by size, from smallest to largest. This means
@@ -1594,7 +1683,9 @@ skip_interest:
       if ((afl->extras_cnt > afl->max_det_extras &&
            rand_below(afl, afl->extras_cnt) >= afl->max_det_extras) ||
           afl->extras[j].len > len - i ||
-          !memcmp(afl->extras[j].data, out_buf + i, afl->extras[j].len)) {
+          !memcmp(afl->extras[j].data, out_buf + i, afl->extras[j].len) ||
+          !memchr(eff_map + EFF_APOS(i), 1,
+                  EFF_SPAN_ALEN(i, afl->extras[j].len))) {
 
         --afl->stage_max;
         continue;
@@ -1641,10 +1732,6 @@ skip_interest:
   if (unlikely(!ex_tmp)) { PFATAL("alloc"); }
 
   for (i = 0; i <= (u32)len; ++i) {
-
-    if (!skip_eff_map[i % len]) continue;
-
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
     afl->stage_cur_byte = i;
 
@@ -1708,10 +1795,6 @@ skip_user_extras:
 
     u32 last_len = 0;
 
-    if (!skip_eff_map[i]) continue;
-
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
-
     afl->stage_cur_byte = i;
 
     u32 min_extra_len = MIN(afl->a_extras_cnt, (u32)USE_AUTO_EXTRAS);
@@ -1720,7 +1803,9 @@ skip_user_extras:
       /* See the comment in the earlier code; extras are sorted by size. */
 
       if (afl->a_extras[j].len > len - i ||
-          !memcmp(afl->a_extras[j].data, out_buf + i, afl->a_extras[j].len)) {
+          !memcmp(afl->a_extras[j].data, out_buf + i, afl->a_extras[j].len) ||
+          !memchr(eff_map + EFF_APOS(i), 1,
+                  EFF_SPAN_ALEN(i, afl->a_extras[j].len))) {
 
         --afl->stage_max;
         continue;
@@ -1767,10 +1852,6 @@ skip_user_extras:
   if (unlikely(!ex_tmp)) { PFATAL("alloc"); }
 
   for (i = 0; i <= (u32)len; ++i) {
-
-    if (!skip_eff_map[i % len]) continue;
-
-    if (is_det_timeout(before_det_time, 0)) { goto custom_mutator_stage; }
 
     afl->stage_cur_byte = i;
 
@@ -1979,19 +2060,6 @@ custom_mutator_stage:
 
 havoc_stage:
 
-#ifdef INTROSPECTION
-
-  if (!is_logged) {
-
-    is_logged = 1;
-    before_havoc_findings = afl->queued_items;
-    before_havoc_edges = count_non_255_bytes(afl, afl->virgin_bits);
-    before_havoc_time = get_cur_time();
-
-  }
-
-#endif
-
   if (unlikely(afl->custom_only)) {
 
     /* Force UI update */
@@ -2192,14 +2260,14 @@ havoc_stage:
 
     retry_havoc_step: {
 
-      u32 r = rand_below(afl, rand_max), item;
+      u32 r = rand_below(feistel(afl, (rand_max&0xffff)), rand_max), item;
 
       switch (mutation_array[r]) {
 
         case MUT_FLIPBIT: {
 
           /* Flip a single bit somewhere. Spooky! */
-          u8  bit = rand_below(afl, 8);
+          u8  bit = aes_sbox[rand_below(afl, 8)];
           u32 off = rand_below(afl, temp_len);
           out_buf[off] ^= 1 << bit;
 
@@ -3401,25 +3469,6 @@ retry_splicing:
 #endif                                                     /* !IGNORE_FINDS */
 
   ret_val = 0;
-
-#ifdef INTROSPECTION
-
-  afl->havoc_prof->queued_det_stage =
-      before_havoc_findings - before_det_findings;
-  afl->havoc_prof->queued_havoc_stage =
-      afl->queued_items - before_havoc_findings;
-  afl->havoc_prof->total_queued_det += afl->havoc_prof->queued_det_stage;
-  afl->havoc_prof->edge_det_stage = before_havoc_edges - before_det_edges;
-  afl->havoc_prof->edge_havoc_stage =
-      count_non_255_bytes(afl, afl->virgin_bits) - before_havoc_edges;
-  afl->havoc_prof->total_det_edge += afl->havoc_prof->edge_det_stage;
-  afl->havoc_prof->det_stage_time = before_havoc_time - before_det_time;
-  afl->havoc_prof->havoc_stage_time = get_cur_time() - before_havoc_time;
-  afl->havoc_prof->total_det_time += afl->havoc_prof->det_stage_time;
-
-  plot_profile_data(afl, afl->queue_cur);
-
-#endif
 
 /* we are through with this queue entry - for this iteration */
 abandon_entry:
@@ -5061,9 +5110,8 @@ pacemaker_fuzzing:
 
       if (unlikely(afl->expand_havoc && afl->ready_for_splicing_count > 1)) {
 
-        /* add expensive havoc cases here, they are activated after a full
-           cycle without any finds happened */
-
+        /*add expensive havoc cases here, they are activated after a full
+           cycle without any finds happened */ 
         ++r_max;
 
       }
@@ -5148,7 +5196,7 @@ pacemaker_fuzzing:
 
             case 5:
               if (temp_len < 8) { break; }
-              *(u32 *)(out_buf + rand_below(afl, temp_len - 3)) ^= 0xFFFFFFFF;
+              *(u32 *)(out_buf + rand_below(feistel(afl,temp_len - 3), temp_len - 3)) ^= 0xFFFFFFFF;
               MOpt_globals.cycles_v2[STAGE_FLIP32]++;
 #ifdef INTROSPECTION
               snprintf(afl->m_tmp, sizeof(afl->m_tmp), " FLIP_BIT32");
@@ -5197,7 +5245,7 @@ pacemaker_fuzzing:
               /* Randomly add to word, random endian. */
               if (rand_below(afl, 2)) {
 
-                u32 pos = rand_below(afl, temp_len - 1);
+                u32 pos = rand_below(feistel(afl,temp_len - 1), temp_len - 1);
 #ifdef INTROSPECTION
                 snprintf(afl->m_tmp, sizeof(afl->m_tmp), " ARITH16+-%u", pos);
                 strcat(afl->mutation, afl->m_tmp);
@@ -5403,7 +5451,7 @@ pacemaker_fuzzing:
                 if (likely(actually_clone)) {
 
                   clone_len = choose_block_len(afl, temp_len);
-                  clone_from = rand_below(afl, temp_len - clone_len + 1);
+                  clone_from = rand_below(feistel(afl,temp_len - clone_len + 1), temp_len - clone_len + 1);
 
                 } else {
 
